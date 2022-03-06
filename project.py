@@ -1,0 +1,143 @@
+'''Importing Libraries'''
+import csv
+import serial
+import pandas as pd
+import math
+import os
+import glob
+import time
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import LinearRegression
+
+#these lines mount the device:
+os.system('modprobe w1-gpio')
+os.system('modprobe w1-therm')
+ 
+base_dir = '/sys/bus/w1/devices/'
+device_path = glob.glob(base_dir + '28*')[0] #get file path of sensor
+rom = device_path.split('/')[-1] #get rom name
+'''This function read the temperature raw data'''
+def read_temp_raw():
+    with open(device_path +'/w1_slave','r') as f:
+        valid, temp = f.readlines()
+    return valid, temp
+ '''This function converts raw data into degree celcius'''
+def read_temp():
+    valid, temp = read_temp_raw()
+
+    while 'YES' not in valid:
+        time.sleep(0.2)
+        valid, temp = read_temp_raw()
+
+    pos = temp.index('t=')
+    if pos != -1:
+        #read the temperature .
+        temp_string = temp[pos+2:]
+        temp_c = float(temp_string)/1000.0 
+        return temp_c
+'''This function reads the pH from dataset and average the pH of same state'''
+def average_ph(current_state):
+    ph_value=0
+    y=0
+    with open('Dataset/waterquality.csv') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for data in reader:
+            if(current_state==data['State/ UT Name']):
+                ph_value=ph_value+float(data['pH-Mean'])
+                y=y+1
+    if(y==0):
+        return 'false'
+    else:
+        ph_value=ph_value/y
+        return ph_value
+'''This function reads the temperature from dataset and average the temperature of same state'''
+def average_temp(current_state):
+    temp_value=0
+    y=0
+    with open('Dataset/waterquality.csv') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for data in reader:
+                if(current_state==data['State/ UT Name']):
+                    temp_value=temp_value+float(data['TEMPERATURE (degree Centigrade)-Mean'])
+                    y=y+1
+    if(y==0):
+        return 'false'
+    else:
+        temp_value=temp_value/y
+        return temp_value
+'''This function reads the population data from dataset of state'''
+def population(stateName):
+    with open('Dataset/Population.csv') as csvfile:
+        read=csv.DictReader(csvfile)
+        for row in read:
+            if(row['India / State/ Union Territory']==stateName):
+                return float(row['Population 2011'])
+        return 'false'
+'''This function calculates the affected population in percentage'''
+def percentage(stateName,path):
+    a=1
+    b=0
+    with open(path) as csvfile:
+        read=csv.DictReader(csvfile)
+        for row in read:
+            if(row['State/ UT Name']==stateName):
+                a=population(row['State/ UT Name'])
+                b=float(row['2014 - Cases'])
+                if(a=='false'):
+                    return 'false'
+                return (b/a)*100
+'''This function writes the data in csv file'''
+def write(stateName,ph,tempreture,percentage):
+    with open('newfile.csv','a') as newfile:
+        fieldnames = ['State/ UT Name','PH','Temp','PERCENTAGE']
+        thewriter = csv.DictWriter(newfile,fieldnames=fieldnames)
+        with open('newfile.csv','r') as csvfile:
+            csv_dict = [row for row in csv.DictReader(csvfile)]
+            if len(csv_dict) == 0:
+                thewriter.writeheader()
+        thewriter.writerow({'State/ UT Name':stateName,'PH':ph,'Temp':tempreture,'PERCENTAGE':percentage,})
+'''This function predict the percentage of affected population'''
+def predict(ph,temp,path,exp):
+    water_index={
+    }
+    '''Read the csv file''''
+    with open(path) as csvfile:
+        reader = csv.DictReader(csvfile)
+        stateName="fkjsag"
+        for line in reader:
+            for x in water_index:
+                if(x==line['State/ UT Name']):
+                    stateName=x
+                    break
+            if(stateName!=line['State/ UT Name'] ):
+                avg_ph=average_ph(line['State/ UT Name'])
+                avg_tmp=average_temp(line['State/ UT Name'])
+                percent=percentage(line['State/ UT Name'],path)
+                if(avg_ph != 'false' and avg_tmp != 'false' and percent != 'false' and avg_ph != 0 and avg_tmp != 0 and percent != 0):
+                    water_index[line['State/ UT Name']]=avg_ph
+                    write(line['State/ UT Name'],avg_ph,avg_tmp,percent)
+    '''Reading csv file'''
+    df = pd.read_csv("newfile.csv")
+    poly=PolynomialFeatures(degree=exp)
+    x_poly=poly.fit_transform(df[['PH','Temp']])
+    '''Training Model'''
+    PolyReg = LinearRegression()
+    PolyReg.fit(x_poly,df.PERCENTAGE)
+    s=PolyReg.predict(poly.fit_transform([[ph,temp]]))
+    os.remove('newfile.csv')
+    return s[0]
+def check_result(result):
+    if(float(result)<0):
+        return 0
+    else:
+        return result
+cholera = 'Disease/Cholera.csv'
+typhoid = 'Disease/Typhoid.csv'
+'''Taking input from Arduino'''
+ser = serial.Serial('/dev/ttyACM0',9600)
+ph = float(ser.readline())
+print('PH value: '+str(ph))
+temp_c = read_temp()
+print('Temperature (°C): '+str(temp_c))
+print('% of people can be affected by Cholera: '+str(check_result(predict(ph,temp_c,cholera,2))))
+print('% of people can be affected by Typhoid: '+str(check_result(predict(ph,temp_c,typhoid,2))))
